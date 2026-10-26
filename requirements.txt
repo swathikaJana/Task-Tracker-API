@@ -1,0 +1,8 @@
+fastapi==0.115.12
+uvicorn
+sqlalchemy
+pydantic
+python-dotenv
+psycopg[binary]
+redis
+alembic
