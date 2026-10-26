@@ -94,18 +94,25 @@ pipeline {
                     --username "$DOCKERHUB_USERNAME" \
                     --password-stdin
 
-                    docker compose -p task-tracker-platform pull api
+                    docker compose -p task-tracker-api pull api
 
                     deploy_and_verify(){
 
-                         docker compose -p task-tracker-platform up -d --no-deps api
+                         docker compose -p task-tracker-api up -d --no-deps api
                   
-                         echo "Waiting for task_tracker_api to become healthy..."
-                    
+                         API_CONTAINER=$(docker compose -p task-tracker-api ps -q api)
+
+                         if [ -z "$API_CONTAINER" ]; then
+                            echo "ERROR: Compose did not create an API container."
+                            return 1
+                         fi
+
+                         echo "Waiting for $API_CONTAINER to become healthy..."
+
                          healthy=false
 
                          for attempt in $(seq 1 12); do
-                             health=$(docker inspect task_tracker_api \
+                             health=$(docker inspect "$API_CONTAINER" \
                                  --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}')
 
                              echo "Health check attempt $attempt/12: $health"
@@ -138,7 +145,7 @@ pipeline {
 
                    echo "API response: $response"
 
-                   echo "$response" | grep -q '"status":"healthy"' || return 1
+                   echo "$response" | grep -q '"status":"ok"' || return 1
                    echo "Post-deployment API test passed!"
                 }
                 if deploy_and_verify; then
@@ -148,8 +155,8 @@ pipeline {
 
                    export IMAGE_TAG="${PREVIOUS_IMAGE##*:}"
 
-                   if docker compose -p task-tracker-platform pull api \
-                       && docker compose -p task-tracker-platform up -d --no-deps api \
+                   if docker compose -p task-tracker-api pull api \
+                       && docker compose -p task-tracker-api up -d --no-deps api \
                        && deploy_and_verify; then
                        echo "Rollback successful. Previous application is healthy."
                     else
