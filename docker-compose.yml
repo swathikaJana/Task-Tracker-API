@@ -1,6 +1,6 @@
 services:
    api:
-     image: task-tracker-api:v2
+     image: scratch2devops/task-tracker-platform:${IMAGE_TAG:-2}
      container_name: task_tracker_api
      ports:
         - "8002:8000"
