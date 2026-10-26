@@ -1,5 +1,6 @@
 pipeline {
     agent any
+
     stages {
         stage('Checkout') {
             steps {
@@ -31,151 +32,151 @@ pipeline {
                 sh '.venv/bin/python -m pytest -v tests/'
             }
         }
+
         stage('Build Docker Image') {
             steps {
                 sh 'docker build -t task-tracker-platform:${BUILD_NUMBER} .'
             }
         }
-       
-        
+
         stage('Push Docker Image') {
             steps {
                 withCredentials([usernamePassword(
-                credentialsId: 'scratch2devops',
-                usernameVariable: 'DOCKERHUB_USERNAME',
-                passwordVariable: 'DOCKERHUB_TOKEN'
-              )]) {
-                  sh '''
-                      echo "$DOCKERHUB_TOKEN" | docker login \
-                         --username "$DOCKERHUB_USERNAME" \
-                         --password-stdin
+                    credentialsId: 'scratch2devops',
+                    usernameVariable: 'DOCKERHUB_USERNAME',
+                    passwordVariable: 'DOCKERHUB_TOKEN'
+                )]) {
+                    sh '''
+                        set -e
+                        trap 'docker logout >/dev/null 2>&1 || true' EXIT
 
-                      docker tag task-tracker-platform:${BUILD_NUMBER} \
-                          "$DOCKERHUB_USERNAME/task-tracker-platform:${BUILD_NUMBER}"
+                        echo "$DOCKERHUB_TOKEN" | docker login \
+                            --username "$DOCKERHUB_USERNAME" \
+                            --password-stdin
 
-                      docker push \
-                          "$DOCKERHUB_USERNAME/task-tracker-platform:${BUILD_NUMBER}"
+                        docker tag "task-tracker-platform:$BUILD_NUMBER" \
+                            "$DOCKERHUB_USERNAME/task-tracker-platform:$BUILD_NUMBER"
 
-                      docker logout
-                   '''
-              }
-          } 
-       }
+                        docker push \
+                            "$DOCKERHUB_USERNAME/task-tracker-platform:$BUILD_NUMBER"
+                    '''
+                }
+            }
+        }
 
-
-       
-       stage('Deploy') {
-           steps {
-               withCredentials([
-                   string(
+        stage('Deploy') {
+            steps {
+                withCredentials([
+                    string(
                         credentialsId: 'task-tracker-db-password',
                         variable: 'DB_PASSWORD'
-                   ),
-                   usernamePassword(
-                       credentialsId: 'scratch2devops',
-                       usernameVariable: 'DOCKERHUB_USERNAME',
-                       passwordVariable: 'DOCKERHUB_TOKEN'
-                   )
+                    ),
+                    usernamePassword(
+                        credentialsId: 'scratch2devops',
+                        usernameVariable: 'DOCKERHUB_USERNAME',
+                        passwordVariable: 'DOCKERHUB_TOKEN'
+                    )
                 ]) {
-                   sh '''
-                      trap 'docker logout >/dev/null 2>&1 || true' EXIT
-                      set -e
+                    sh '''
+                        set -e
+                        trap 'docker logout >/dev/null 2>&1 || true' EXIT
 
-                     PREVIOUS_IMAGE=$(docker inspect task_tracker_api \
-                         --format '{{.Config.Image}}')
-
-                     echo "Currently deployed image: $PREVIOUS_IMAGE"
-                     NEW_IMAGE="$DOCKERHUB_USERNAME/task-tracker-platform:$BUILD_NUMBER"
-                     echo "New image to deploy: $NEW_IMAGE"
-                     
-                     export IMAGE_TAG="$BUILD_NUMBER"
-
-                     echo "$DOCKERHUB_TOKEN" | docker login \
-                    --username "$DOCKERHUB_USERNAME" \
-                    --password-stdin
-
-                    docker compose -p task-tracker-api pull api
-
-                    deploy_and_verify(){
-
-                         docker compose -p task-tracker-api up -d --no-deps api
-                  
-                         API_CONTAINER=$(docker compose -p task-tracker-api ps -q api)
-
-                         if [ -z "$API_CONTAINER" ]; then
-                            echo "ERROR: Compose did not create an API container."
-                            return 1
-                         fi
-
-                         echo "Waiting for $API_CONTAINER to become healthy..."
-
-                         healthy=false
-
-                         for attempt in $(seq 1 12); do
-                             health=$(docker inspect "$API_CONTAINER" \
-                                 --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}')
-
-                             echo "Health check attempt $attempt/12: $health"
-
-                             if [ "$health" = "healthy" ]; then
-                                  echo "Deployment health check passed!"
-                                  healthy=true
-                                  break
-                             fi
-
-                             if [ "$health" = "unhealthy" ] || [ "$health" = "no-healthcheck" ]; then
-                                  echo "ERROR: Container is $health"
-                                  return 1
+                        # During the one-time transition the old API is
+                        # task-tracker-platform-api-1. Later runs use the
+                        # standardized task-tracker-api project.
+                        PREVIOUS_CONTAINER=task-tracker-api-api-1
+                        if ! docker inspect "$PREVIOUS_CONTAINER" >/dev/null 2>&1; then
+                            PREVIOUS_CONTAINER=task-tracker-platform-api-1
                         fi
 
-                        sleep 5
-                   done
-                   
-                   if [ "$healthy" != "true" ]; then
-                         echo "ERROR: Application did not become healthy within the retry window."
-                         return 1
-                   fi
+                        PREVIOUS_IMAGE=$(docker inspect "$PREVIOUS_CONTAINER" \
+                            --format '{{.Config.Image}}')
+                        PREVIOUS_TAG="${PREVIOUS_IMAGE##*:}"
 
-                        
-                   echo "Testing deployed API..."
+                        echo "Previous API image: $PREVIOUS_IMAGE"
+                        export IMAGE_TAG="$BUILD_NUMBER"
 
-                   response=$(curl --fail --silent --show-error \
-                       --max-time 10 \
-                      http://api:8000/health) || return 1
+                        echo "$DOCKERHUB_TOKEN" | docker login \
+                            --username "$DOCKERHUB_USERNAME" \
+                            --password-stdin
 
-                   echo "API response: $response"
+                        docker compose -p task-tracker-api pull api
 
-                   echo "$response" | grep -q '"status":"ok"' || return 1
-                   echo "Post-deployment API test passed!"
+                        # Free port 8002 on the first deployment. This stops
+                        # only the legacy API; it leaves DB, Redis, and volumes alone.
+                        docker compose -p task-tracker-platform stop api || true
+
+                        deploy_and_verify() {
+                            docker compose -p task-tracker-api up -d --no-deps api
+
+                            container=$(docker compose -p task-tracker-api ps -q api)
+                            if [ -z "$container" ]; then
+                                echo "ERROR: Compose did not create the API container."
+                                return 1
+                            fi
+
+                            echo "Waiting for API health..."
+                            healthy=false
+
+                            for attempt in $(seq 1 18); do
+                                health=$(docker inspect "$container" \
+                                    --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}')
+
+                                echo "Health check attempt $attempt/18: $health"
+
+                                if [ "$health" = "healthy" ]; then
+                                    healthy=true
+                                    break
+                                fi
+
+                                if [ "$health" = "unhealthy" ] || [ "$health" = "no-healthcheck" ]; then
+                                    echo "ERROR: API container health is $health."
+                                    return 1
+                                fi
+
+                                sleep 5
+                            done
+
+                            if [ "$healthy" != "true" ]; then
+                                echo "ERROR: API did not become healthy in time."
+                                return 1
+                            fi
+
+                            response=$(curl --fail --silent --show-error \
+                                --max-time 10 http://localhost:8002/health) || return 1
+
+                            echo "Health endpoint response: $response"
+                            echo "$response" | grep -q '"status":"ok"' || {
+                                echo "ERROR: Health endpoint returned an unexpected response."
+                                return 1
+                            }
+                        }
+
+                        if deploy_and_verify; then
+                            echo "Deployment successful."
+                        else
+                            echo "ERROR: Deployment failed. Restoring $PREVIOUS_IMAGE."
+
+                            export IMAGE_TAG="$PREVIOUS_TAG"
+
+                            if docker compose -p task-tracker-api pull api \
+                                && deploy_and_verify; then
+                                echo "Rollback successful. Previous API is healthy."
+                            else
+                                echo "CRITICAL: Rollback failed. Check the API container and Jenkins log."
+                            fi
+
+                            exit 1
+                        fi
+                    '''
                 }
-                if deploy_and_verify; then
-                    echo "Deployment successful!"
-                else 
-                   echo "ERROR: New deployment failed. Rolling back to $PREVIOUS_IMAGE"
-
-                   export IMAGE_TAG="${PREVIOUS_IMAGE##*:}"
-
-                   if docker compose -p task-tracker-api pull api \
-                       && docker compose -p task-tracker-api up -d --no-deps api \
-                       && deploy_and_verify; then
-                       echo "Rollback successful. Previous application is healthy."
-                    else
-                       echo "CRITICAL: Rollback did not restore a healthy application."
-                    fi
-
-                    exit 1
-                 fi
-
-              '''
-           }
-         }
-       }
+            }
+        }
     }
 
-  
-   post {
+    post {
         success {
-            echo 'CI pipeline completed successfully!'
+            echo 'CI pipeline completed successfully.'
         }
         failure {
             echo 'CI pipeline failed. Check the console output.'
@@ -185,4 +186,3 @@ pipeline {
         }
     }
 }
-
