@@ -1,12 +1,11 @@
 services:
    api:
      image: scratch2devops/task-tracker-platform:${IMAGE_TAG:-2}
-     container_name: task_tracker_api
      ports:
         - "8002:8000"
 
      environment:
-       DATABASE_URL: "postgresql+psycopg://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}"
+       DATABASE_URL: postgresql+psycopg://task_tracker:${DB_PASSWORD:?Set DB_PASSWORD in .env}@db:5432/task_tracker_db
        APP_NAME: "Task Tracker API"
        LOG_LEVEL: INFO
        REDIS_URL: redis://redis:6379/0
