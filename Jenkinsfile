@@ -142,8 +142,8 @@ pipeline {
                                 return 1
                             fi
 
-                            response=$(curl --fail --silent --show-error \
-                                --max-time 10 http://localhost:8002/health) || return 1
+                            response=$(docker exec "$container" python -c \
+                               "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read().decode())") || return 1
 
                             echo "Health endpoint response: $response"
                             echo "$response" | grep -q '"status":"ok"' || {
